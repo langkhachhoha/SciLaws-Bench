@@ -14,6 +14,10 @@ Supported providers, selected by alias prefix in `api_source_mapping`:
           Google, Meta, DeepSeek, Qwen, Mistral, etc. via one key).
           Base URL from `OPENROUTER_BASE` (defaults to
           https://openrouter.ai/api/v1).
+- 'br'  : Amazon Bedrock (claude-* via the `anthropic[bedrock]` SDK). No API
+          key: credentials come from the standard AWS chain (`AWS_PROFILE`,
+          env vars, instance role). Region from `AWS_REGION` (defaults to
+          us-east-1).
 
 Each provider has its own response-shape quirk (reasoning content, token
 budgets, system-prompt placement) — the per-source branch in `call_llm_api`
@@ -66,6 +70,11 @@ _DMXAPI_BASE = os.getenv("DMXAPI_BASE", "https://www.dmxapi.cn/v1")
 _LOCAL_OPENAI_BASE = os.getenv("LOCAL_OPENAI_BASE", "http://localhost:30000/v1")
 _LOCAL_GLM52_MODEL = os.getenv("LOCAL_GLM52_MODEL", "glm-5.2")
 _OPENROUTER_BASE = os.getenv("OPENROUTER_BASE", "https://openrouter.ai/api/v1")
+_BEDROCK_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
+# anthropic>=2 sends API version 2026-10-21, which Bedrock accepts only for
+# Claude 4.7 and later ("Invalid API version" otherwise). Older models keep the
+# classic Bedrock body version; the SDK only fills the field when it is unset.
+_BEDROCK_LEGACY_VERSION_MODELS = {"us.anthropic.claude-opus-4-6-v1", "us.anthropic.claude-sonnet-4-6"}
 
 
 # Alias → exact OpenAI model id. NOTE: OpenAI's `/v1/models` listing endpoint
@@ -190,6 +199,15 @@ api_source_mapping = {
     "or-deepseek-v4-pro":  ("or", "deepseek/deepseek-v4-pro"),
     "or-qwen37max":        ("or", "qwen/qwen3.7-max"),
     "or-qwen3.7-max":      ("or", "qwen/qwen3.7-max"),
+
+    # Amazon Bedrock — Claude via US cross-region inference profiles
+    # (`aws bedrock list-inference-profiles`). Which ids an account may call
+    # depends on its model-access grants; a missing grant surfaces as
+    # AccessDeniedException / 403 on the first turn.
+    "br-claude-opus-4-8":   ("br", "us.anthropic.claude-opus-4-8"),
+    "br-claude-opus-4-7":   ("br", "us.anthropic.claude-opus-4-7"),
+    "br-claude-opus-4-6":   ("br", "us.anthropic.claude-opus-4-6-v1"),
+    "br-claude-sonnet-4-6": ("br", "us.anthropic.claude-sonnet-4-6"),
     # Examples (uncomment / add as needed):
     # "or/claude-opus-4-7":   ("or", "anthropic/claude-opus-4-7"),
     # "or/gemini-3-pro":      ("or", "google/gemini-3-pro"),
@@ -218,6 +236,7 @@ _REASONING_MODELS = {
     "or-claude-opus-4-7", "or-claude-opus-4", "or-claude-sonnet-4-6",
     "or-gemini-3-1-pro", "or-gemini-3.1-pro",
     "or-glm52", "or-glm-5.2", "or-deepseek-v4-pro", "or-qwen37max", "or-qwen3.7-max",
+    "br-claude-opus-4-8", "br-claude-opus-4-7", "br-claude-opus-4-6", "br-claude-sonnet-4-6",
     # DMXAPI: GLM-5.1, Kimi-K2.6 and Qwen3.6-Plus are thinking models —
     # reasoning is included in `completion_tokens` and exposed via
     # `reasoning_content`, so the dm branch needs a large max_tokens
@@ -355,7 +374,7 @@ def _provider_name(api_source: str) -> str:
     """Human-readable provider label for error/log messages."""
     return {"oa": "OpenAI", "ds": "DeepSeek", "an": "Anthropic",
             "go": "Google", "dm": "DMXAPI", "lo": "local OpenAI",
-            "or": "OpenRouter"}.get(api_source, api_source)
+            "or": "OpenRouter", "br": "Amazon Bedrock"}.get(api_source, api_source)
 
 
 def _call_anthropic(messages, model, keys, trial_id):
@@ -402,6 +421,82 @@ def _call_anthropic(messages, model, keys, trial_id):
         "total_tokens": int(getattr(u, "input_tokens", 0) or 0) + int(getattr(u, "output_tokens", 0) or 0),
         "finish_reason": getattr(resp, "stop_reason", "stop"),
         "model": model, "api_source": "an",
+    }
+    if breakdown["finish_reason"] in ("max_tokens",):
+        print(f"[Trial {trial_id}] WARNING: {model} hit max_tokens "
+              f"(output={breakdown['completion_tokens']}). Tool body likely truncated.",
+              flush=True)
+    return content, (thinking or None), breakdown
+
+
+def _call_bedrock_claude(messages, model, trial_id):
+    """Claude on Amazon Bedrock (bedrock-runtime InvokeModel). Unlike
+    `_call_anthropic`, this turns thinking on explicitly — Opus 4.7/4.8 run
+    WITHOUT thinking when `thinking` is omitted — at the paper's medium tier
+    (Appendix B.1), overridable via REASONING_EFFORT. Streams so the 65k
+    completion budget does not trip the SDK's long-request guard; the result
+    is the same final message a non-streaming call returns."""
+    try:
+        import anthropic
+    except ImportError as e:
+        raise ImportError("`pip install 'anthropic[bedrock]'` is required for br-* models.") from e
+    client = anthropic.AnthropicBedrock(aws_region=_BEDROCK_REGION,
+                                        timeout=_LLM_TIMEOUT_SECONDS, max_retries=1)
+    system_text, chat = _split_system(messages)
+    kwargs = {
+        "model": model,
+        "system": system_text,
+        "messages": chat,
+        "max_tokens": _REASONING_MAX_COMPLETION_TOKENS,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": _OPENAI_REASONING_EFFORT or "medium"},
+        # Always on here, unlike the global _USE_STOP: with adaptive
+        # (interleaved) thinking Claude does not end its turn after one tool
+        # block — it keeps writing imagined <experiment>/<python> calls (40k+
+        # output tokens on turn 1 of a Parallel task), all of which land in the
+        # chat history. Stopping at the first close tag leaves exactly one
+        # block; `_heal_close_tag` restores the stripped tag.
+        "stop_sequences": list(_TOOL_CLOSE_TAGS),
+    }
+    if model in _BEDROCK_LEGACY_VERSION_MODELS:
+        kwargs["extra_body"] = {"anthropic_version": "bedrock-2023-05-31"}
+    for attempt in (1, 2):
+        try:
+            with client.messages.stream(**kwargs) as stream:
+                resp = stream.get_final_message()
+            break
+        except anthropic.APIStatusError as e:
+            print(f"[Trial {trial_id}] Amazon Bedrock API error on {model}: {e}", flush=True)
+            raise
+        except Exception as e:
+            # A connection dropped mid-stream ("peer closed connection without
+            # sending complete message body") is outside the SDK's max_retries,
+            # which only guards opening the request, and agent.py does not catch
+            # it — the task dies. Give it the paper's single retry (B.2).
+            print(f"[Trial {trial_id}] Amazon Bedrock stream error on {model} "
+                  f"(attempt {attempt}/2): {type(e).__name__}: {e}", flush=True)
+            if attempt == 2:
+                raise
+    content = ""
+    thinking = ""
+    for block in resp.content or []:
+        btype = getattr(block, "type", None)
+        if btype == "text":
+            content += getattr(block, "text", "") or ""
+        elif btype == "thinking":
+            thinking += getattr(block, "thinking", "") or ""
+    content = _heal_close_tag(content)
+    u = getattr(resp, "usage", None)
+    details = getattr(u, "output_tokens_details", None)
+    breakdown = {
+        "prompt_tokens": int(getattr(u, "input_tokens", 0) or 0),
+        "prompt_cached_tokens": int(getattr(u, "cache_read_input_tokens", 0) or 0),
+        "completion_tokens": int(getattr(u, "output_tokens", 0) or 0),
+        # Thinking is billed inside output_tokens; the split is informational.
+        "reasoning_tokens": int(getattr(details, "thinking_tokens", 0) or 0),
+        "total_tokens": int(getattr(u, "input_tokens", 0) or 0) + int(getattr(u, "output_tokens", 0) or 0),
+        "finish_reason": getattr(resp, "stop_reason", "stop"),
+        "model": model, "api_source": "br",
     }
     if breakdown["finish_reason"] in ("max_tokens",):
         print(f"[Trial {trial_id}] WARNING: {model} hit max_tokens "
@@ -477,6 +572,8 @@ def call_llm_api(messages, model_name, keys=keys, temperature=0.4, trial_info=No
 
     if api_source == 'an':
         return _call_anthropic(messages, full_model_name, keys, trial_id)
+    if api_source == 'br':
+        return _call_bedrock_claude(messages, full_model_name, trial_id)
     if api_source == 'go':
         return _call_gemini(messages, full_model_name, keys, trial_id)
 
