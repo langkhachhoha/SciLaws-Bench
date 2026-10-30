@@ -18,8 +18,12 @@
 # Bedrock (judge results are kept across reruns) and prints S_S over 66 tasks.
 # Judge every run you compare with the same JUDGE_MODEL.
 #
+# EXPERIMENT_GUIDANCE=1 runs the same agent with the <experiment> format taught
+# (guided_agent/experiment_guidance.py) in its own run dir, *_guided by default.
+#
 # Overrides (env): RUN_NAME, WORKERS, MAX_PASSES, RETRY_SLEEP, TASK_TIMEOUT,
-#                  SKIP_SCORE=1, JUDGE_MODEL, AWS_PROFILE, AWS_REGION.
+#                  SKIP_SCORE=1, JUDGE_MODEL, AWS_PROFILE, AWS_REGION,
+#                  EXPERIMENT_GUIDANCE=1.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -29,7 +33,8 @@ MODEL=br-qwen3-coder-30b
 TASK_TYPE=typeI
 N_TASKS=66
 MAX_TURNS=30
-RUN_NAME=${RUN_NAME:-parallel_${TASK_TYPE}_${MODEL}}
+GUIDANCE_SUFFIX=${EXPERIMENT_GUIDANCE:+_guided}
+RUN_NAME=${RUN_NAME:-parallel_${TASK_TYPE}_${MODEL}${GUIDANCE_SUFFIX}}
 RUN_DIR=$REPO/experiments/$RUN_NAME
 WORKERS=${WORKERS:-8}
 MAX_PASSES=${MAX_PASSES:-3}
@@ -94,6 +99,7 @@ for pass in $(seq 1 "$MAX_PASSES"); do
         --task-timeout-seconds "$TASK_TIMEOUT" \
         --run-dir "$RUN_DIR" --run-id "$RUN_NAME" \
         --skip-existing --skip-finished --merge-existing-summary \
+        ${EXPERIMENT_GUIDANCE:+--experiment-guidance} \
         2>&1 | tee "$RUN_DIR/batch_logs/batch_$(stamp).log" || true
     left=$(count_unfinished)
     if [[ $left -gt 0 && $pass -lt $MAX_PASSES ]]; then

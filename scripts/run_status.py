@@ -19,12 +19,26 @@ REPO = Path(__file__).resolve().parent.parent
 PRICE = {"br-glm-5": (1.00, 3.20), "br-qwen3-coder-30b": (0.15, 0.60)}
 
 
+def _failed_experiments(trial: dict) -> tuple[int, int]:
+    """Rejected <experiment> calls and the longest run of them in a row. A loop
+    of A-B-A-B replies or of a new mistake each turn repeats no reply at all."""
+    failed = streak = longest = 0
+    for m in trial.get("chat_history") or []:
+        if m["role"] != "user" or not m["content"].startswith("<experiment_output>"):
+            continue
+        streak = streak + 1 if m["content"].startswith('<experiment_output>\n{"error"') else 0
+        failed += streak > 0
+        longest = max(longest, streak)
+    return failed, longest
+
+
 def main() -> int:
     run = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "experiments" / "parallel_typeI_br-glm-5"
     meta = json.loads((run / "run_meta.json").read_text())
     now = time.time()
     rows, tokens = [], [0, 0]
     looping = 0
+    failed_calls = failed_tasks = worst_streak = 0
     for model in meta["models"]:
         for ttype in meta["task_types"]:
             n_tasks = len(list((REPO / "tasks" / ttype).glob("*/metadata.yaml")))
@@ -47,6 +61,10 @@ def main() -> int:
                            if m["role"] == "assistant"]
                 repeats = sum(bool(a) and a == b for a, b in zip(replies, replies[1:]))
                 looping += repeats >= 3
+                failed, streak = _failed_experiments(trial)
+                failed_calls += failed
+                failed_tasks += failed > 0
+                worst_streak = max(worst_streak, streak)
                 if sub.exists() and sub.read_text(errors="replace").strip():
                     counts["submitted"] += 1
                 elif trial.get("status") == "max_turns_reached":
@@ -63,7 +81,9 @@ def main() -> int:
     price = PRICE.get(meta["models"][0])
     cost = f"  ~${(tokens[0] * price[0] + tokens[1] * price[1]) / 1e6:.2f}" if price else ""
     print(f"agent tokens so far: {tokens[0]:,} in / {tokens[1]:,} out{cost}")
-    print(f"tasks repeating a reply 3+ times: {looping}\n")
+    print(f"tasks repeating a reply 3+ times: {looping}")
+    print(f"failed <experiment> calls: {failed_calls} in {failed_tasks} tasks, "
+          f"longest streak {worst_streak}\n")
     if rows:
         print(f"{'task':58} {'turn':>4} {'exp':>3} {'py':>3} {'rep':>3} {'idle':>6}")
         for task, turns, exp, py, repeats, idle in rows:

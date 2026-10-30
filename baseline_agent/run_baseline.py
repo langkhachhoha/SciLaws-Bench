@@ -63,6 +63,9 @@ def main() -> None:
     ap.add_argument("--no-include-test-range", dest="include_test_range",
                     action="store_false",
                     help="omit public metadata input train->test ranges from the task prompt")
+    ap.add_argument("--experiment-guidance", action="store_true",
+                    help=("simulator mode: teach the <experiment> request format, see "
+                          "guided_agent/experiment_guidance.py (off for the reference agent)"))
     args = ap.parse_args()
 
     include_test_range = (
@@ -78,6 +81,10 @@ def main() -> None:
         simulator=args.simulator,
         show_test_range=include_test_range,
     )
+    if args.experiment_guidance:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "guided_agent"))
+        from experiment_guidance import install_experiment_guidance  # noqa: PLC0415
+        install_experiment_guidance(task)
     task_type = "typeII" if task.has_group_id else "typeI"
     mode = "simulator" if args.simulator is not None else "fix"
     objective = (
@@ -105,6 +112,7 @@ def main() -> None:
                 "model": args.model,
                 "max_turns": args.max_turns,
                 "include_test_range": include_test_range,
+                "experiment_guidance": args.experiment_guidance,
                 "checkpoint_path": str(traj_path),
                 "updated_at_unix": time.time(),
             },
