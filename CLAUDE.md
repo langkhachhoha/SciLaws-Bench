@@ -6,6 +6,12 @@ upstream reference agent (`baseline_agent/`) is the baseline to beat. A
 Vietnamese walkthrough of the run pipeline and the first smoke-test result is in
 `notes/phan_tich_cau_truc_va_ket_qua.md`.
 
+**Scope since 2026-10-30: Type I (single-group) tasks only — the 66 tasks in
+`tasks/typeI/`.** Run, score and compare on that split (`--task-types typeI`),
+dividing by 66. The paper's per-split numbers are in
+`baseline_agent/all_results.md` ("Parallel typeI" column; GLM-5.2 0.5644,
+Claude Opus 4.8 0.5303). Type II stays downloaded but is not run.
+
 ## Setup
 
 ```bash
@@ -22,12 +28,22 @@ the counts match (it skips files already present).
 ## Commands
 
 ```bash
-# One Parallel task, reference agent, paper defaults (30 turns, effort=medium)
-.venv/bin/python baseline_agent/run_baseline.py tasks/typeI/<task> br-claude-sonnet-4-6 --simulator --out <dir>
+# Main run: all 66 Type I tasks, reference agent on GLM-5, 30 turns, then judge
+# and S_S over 66. Meant for tmux; rerun the same command to resume.
+bash scripts/run_parallel_typeI_glm5.sh          # -> experiments/parallel_typeI_br-glm-5/
+# Same for GLM-4.7 Flash, thinking off (the small non-reasoning row, like the
+# paper's gpt-4o-mini): -> experiments/parallel_typeI_br-glm-4.7-flash/
+bash scripts/run_parallel_typeI_glm47flash.sh
+# Their screen stays silent until a task finishes (~10-15 min); per-turn progress:
+watch -n 20 .venv/bin/python scripts/run_status.py [<run_dir>]
 
-# Many tasks (writes summary.tsv/json, per-task logs, trajectories, submissions)
-.venv/bin/python baseline_agent/run_batch.py --models br-claude-sonnet-4-6 --modes parallel \
-    --task-types typeI typeII --workers 4 --run-dir experiments/<run_name>
+# One Parallel task, reference agent, paper defaults (30 turns)
+.venv/bin/python baseline_agent/run_baseline.py tasks/typeI/<task> br-glm-5 --simulator --out <dir>
+
+# Many tasks (writes summary.tsv/json, per-task logs, trajectories, submissions).
+# --skip-existing --skip-finished --merge-existing-summary resumes a run dir.
+.venv/bin/python baseline_agent/run_batch.py --models br-glm-5 --modes parallel \
+    --task-types typeI --workers 8 --run-dir experiments/<run_name>
 
 # Score S_S: stage with the official scorer, then judge on Bedrock (no Codex here)
 .venv/bin/python harness/evaluate_parallel.py --tasks-dir tasks \
@@ -40,12 +56,18 @@ the counts match (it skips files already present).
 The official `--dispatch codex` path needs the `codex` CLI and an OpenAI key;
 neither exists on this machine. `scripts/judge_parallel_bedrock.py` reuses the
 verbatim judge prompt and the official aggregation, but the judge model differs
-from the paper's (GPT-5.4-mini), so report it as such.
+from the paper's (GPT-5.4-mini; here Opus 4.6 by default), so report it as such.
+
+The official `strict_mean` in `parallel_summary.json` averages over *staged
+submissions*, not over all tasks: tasks without a submission are absent from the
+manifest. S_S as the paper reports it divides by 66; the run script writes it to
+`experiments/<run>/score_typeI.json`. Restaging with `--overwrite` deletes the
+output dir, judge results included.
 
 ## Models on Bedrock
 
-Use the `br-*` aliases in `baseline_agent/call_llm_api.py`. They turn on adaptive
-thinking at `effort=medium` (paper Appendix B.1; override with
+Use the `br-*` aliases in `baseline_agent/call_llm_api.py`. The Claude ones turn
+on adaptive thinking at `effort=medium` (paper Appendix B.1; override with
 `REASONING_EFFORT`) and always send stop sequences at the tool close tags. Without
 the stop sequences, Claude with interleaved thinking writes dozens of imagined
 `<experiment>`/`<python>` blocks per turn (42k output tokens on turn 1, kept in
@@ -53,23 +75,63 @@ history); see `experiments/aborted_nostop_br-claude-sonnet-4-6/`. The upstream
 `an` provider sends no `thinking` field, so Claude runs without reasoning there —
 do not use it for paper-comparable runs.
 
-Access on account `reddy-research` (probed 2026-10-29): callable — Claude Opus
-4.6, Sonnet 4.6, Sonnet 4.5, Haiku 4.5, DeepSeek R1 / V3.2, GLM-5. Denied —
-Claude Opus 4.7 / 4.8, Opus 5 / 5.5, Sonnet 5 / 5.5, GPT-5.4 / 5.5, GLM-5.3. None
-of the paper's nine models is callable, so no run here is a like-for-like
-reproduction of a paper row. The Mantle endpoint (`AnthropicBedrockMantle`)
-serves none of these models to this account (403 for Opus 4.8, 404 for Sonnet
-4.6), so the `br` provider uses `AnthropicBedrock` with `us.` inference profiles.
+**GLM-5** (`br-glm-5`, provider `bo`, model `zai.glm-5`) is the working model:
+≈$0.7 per Parallel task against ≈$4.2 for Opus 4.6, and a 100M tokens/minute
+on-demand quota. It goes through `InvokeModel` with an OpenAI chat-completions
+body, because what works for Claude does not work here (probed 2026-10-30):
+- Thinking turns on only with `reasoning_effort: "high"`; `low`/`medium` (and
+  `thinking`/`enable_thinking` fields) produce no reasoning at all. GLM thinking
+  is on/off, so "high" is the thinking-on setting, not a higher tier than the
+  paper's. Do not export `REASONING_EFFORT=medium` for it.
+- The reasoning comes back inside `content` as `<reasoning>…</reasoning>`,
+  sometimes followed by a stray tail ending in `</think>`; the provider moves
+  both to `reasoning_content`, which `agent.py` never feeds back.
+- Converse rejects `stopSequences` for this model, and InvokeModel's `stop`
+  can fire inside the inline reasoning. The provider sends no stop and cuts the
+  visible text after the first tool close tag instead (logged when it drops
+  anything), which leaves one block per turn as the `br` stop does. The paper's
+  OpenAI-compatible providers sent no stop at all (`_USE_STOP = False`).
+
+**GLM-4.7 Flash** (`br-glm-4.7-flash`, same `bo` provider) is a hybrid model
+run with thinking off: it is left out of `_REASONING_MODELS`, so no
+`reasoning_effort` is sent (only "high" would turn thinking on) and it gets the
+paper's non-reasoning settings, 8192 output tokens and temperature 0.4.
+≈$0.015 per task. A 3-task pilot of small models (2026-10-30) found Qwen3 32B
+unusable (32k context, crashed mid-task) and Llama 4 Maverick submitting after
+~6 turns.
+
+gpt-oss-20b on Bedrock was tried and dropped (2026-10-30): after its reasoning it
+often returns no visible text (InvokeModel and Converse alike) — 22 of 31 turns
+empty and no formula on `cepheid_period_luminosity__M_W`.
+
+Access on account `reddy-research` (probed 2026-10-30 with one call to each of
+the 96 Bedrock text models): callable Claude — Opus 4.6 / 4.5 / 4.1, Sonnet 4.6
+/ 4.5, Haiku 4.5; callable open-weight — GLM-5 / 4.7, DeepSeek R1 / V3.2, Kimi
+K2.5 / K2 Thinking / K3, Qwen3, MiniMax M2.x, gpt-oss, Llama, Mistral Large 3,
+Nova, and more. Denied — every Claude 4.7+ (Opus 4.7 / 4.8 / 5 / 5.5, Sonnet 5 /
+5.5, Haiku 5.5, Fable), GPT-5.4+ / GPT-6.x, GLM-5.3, Grok. None of the paper's
+nine models is callable, so no run here is a like-for-like reproduction of a
+paper row. The Mantle endpoint (`AnthropicBedrockMantle`) serves none of the
+Claude models to this account (403 for Opus 4.8, 404 for Sonnet 4.6), so the
+`br` provider uses `AnthropicBedrock` with `us.` inference profiles.
 
 - `anthropic>=2` sends API version `2026-10-21`; Bedrock rejects it for models
   older than Claude 4.7 (`400 Invalid API version`). The `br` provider and the
   judge script send `anthropic_version: bedrock-2023-05-31` for those models
   instead. Pinning `anthropic<2` is the alternative; PyPI was unreachable here.
-- Daily token quotas are small and not listed by `service-quotas`: Sonnet 4.6
-  returned `429 Too many tokens per day` after ~580k tokens in one day (≈450k
-  input + 130k output across two 20-turn runs and a few tests).
-  One Parallel task costs ~250k input tokens; budget full-benchmark runs per
-  model per day accordingly, and note `global.*` profiles throttle separately.
+- Claude daily token quotas are small and not listed by `service-quotas`: Sonnet
+  4.6 returned `429 Too many tokens per day` after ~580k tokens in one day
+  (≈450k input + 130k output across two 20-turn runs and a few tests). A
+  30-turn Parallel task used 652k input + 23k output tokens on Opus 4.6 (no
+  prompt caching: every turn resends the whole history), so a full Claude run
+  does not fit in a day's quota. `global.*` profiles throttle separately: on
+  2026-10-30 the judge's default `us.` Opus 4.6 returned the daily 429 while
+  `--model global.anthropic.claude-opus-4-6-v1` (same model) still worked.
+- `us.*` profiles cost 10% more than `global.*` (Cost Explorer: Opus 4.6
+  $5.50 / $27.50 vs $5 / $25 per 1M tokens).
+- The account is shared and credit-funded: other users' GLM / Kimi / Qwen / EC2
+  spend is most of the bill (~$10k in Oct 2026). No API reports the remaining
+  credit; ask the account owner before large runs.
 
 ## Layout and boundaries
 
@@ -80,9 +142,11 @@ serves none of these models to this account (403 for Opus 4.8, 404 for Sonnet
 - `baseline_agent/` — the reference ReAct loop (`agent.py`), task loaders
   (`task.py`), LLM client (`call_llm_api.py`), batch / resume / salvage runners.
 - `scripts/judge_parallel_bedrock.py` — Bedrock stand-in for the Codex judge.
+- `scripts/run_parallel_typeI_glm5.sh` — resumable Type I run + scoring.
 - `experiments/` — tracked run outputs. `batch_runs/`, `results/`,
-  `submissions/`, `parallel_stage/`, `parallel_out/` at the repo root are
-  gitignored.
+  `submissions/`, `parallel_stage/`, `parallel_out/` are gitignored anywhere,
+  except `submissions/` and `parallel_out/` under `experiments/`.
+  `parallel_stage/` stays ignored there: it copies the hidden `formula.py`.
 - `tasks/` — downloaded data, gitignored.
 
 ## Parallel-mode facts that are easy to get wrong
@@ -114,5 +178,10 @@ serves none of these models to this account (403 for Opus 4.8, 404 for Sonnet
   with `simulator=None` (Real mode), so it cannot resume a Parallel run — rerun
   it, or salvage with `force_final_from_traj.py`. The `br` provider retries a
   stream dropped mid-response once; the SDK's own retry does not cover that.
+- Resuming a batch: `run_batch.py --skip-existing` alone also reruns tasks that
+  ended `max_turns_reached` with no formula, which gives the model a second try
+  at a task it already failed. Add `--skip-finished` so only interrupted
+  (`running*`) or missing tasks rerun; they restart from turn 0, and the
+  interrupted attempt's trajectory and log are kept as `*.aborted-<UTC stamp>`.
 - Per-task paper scores for every model: `baseline_agent/model_task_scores.json`.
 - Summaries and trajectories record absolute paths of this machine.

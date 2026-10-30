@@ -364,7 +364,14 @@ def _existing_row(job: dict[str, Any], args: argparse.Namespace) -> dict[str, An
     numeric_path = paths["numeric_path"]
 
     submitted = _submission_nonempty(submission_path)
-    if not submitted:
+    traj_info = _row_from_traj(traj_path)
+    # An agent that used all its turns without a formula finished its attempt;
+    # it scores 0, and rerunning it would hand the model a second try.
+    finished_unsubmitted = (
+        args.skip_finished and not submitted
+        and traj_info.get("status") == "max_turns_reached"
+    )
+    if not submitted and not finished_unsubmitted:
         return None
 
     score_info = {
@@ -375,17 +382,16 @@ def _existing_row(job: dict[str, Any], args: argparse.Namespace) -> dict[str, An
         "score_status": "",
         "contract_ok": "",
     }
-    if mode == "real":
+    if mode == "real" and submitted:
         score_info = (
             _score_info_from_numeric(numeric_path)
             or _score_real_submission(task_dir, submission_path, include_range, numeric_path)
         )
 
     qualified = _is_qualified(mode, submitted, score_info)
-    if not qualified:
+    if not qualified and not finished_unsubmitted:
         return None
 
-    traj_info = _row_from_traj(traj_path)
     row = {
         "run_id": args.run_id,
         "model": model,
@@ -395,10 +401,10 @@ def _existing_row(job: dict[str, Any], args: argparse.Namespace) -> dict[str, An
         "task_dir": str(task_dir),
         "max_turns": args.max_turns,
         "include_test_range": str(include_range).lower(),
-        "returncode": 0,
+        "returncode": 0 if submitted else 1,
         "status": traj_info.get("status") or "completed_existing",
-        "submitted": "1",
-        "qualified_submission": "1",
+        "submitted": "1" if submitted else "0",
+        "qualified_submission": "1" if qualified else "0",
         "rounds": traj_info.get("rounds", ""),
         "total_tokens": traj_info.get("total_tokens", ""),
         "n_experiments": traj_info.get("n_experiments", ""),
@@ -413,6 +419,18 @@ def _existing_row(job: dict[str, Any], args: argparse.Namespace) -> dict[str, An
     }
     row.update(score_info)
     return row
+
+
+def _archive_interrupted(traj_path: Path, log_path: Path) -> None:
+    """Keep a crashed attempt's trajectory and log beside its rerun instead of
+    overwriting them. The renamed copies no longer match `*.traj.json`."""
+    status = _row_from_traj(traj_path).get("status") or ""
+    if not status.startswith("running"):
+        return
+    stamp = _utc_stamp()
+    for path in (traj_path, log_path):
+        if path.exists():
+            os.replace(path, path.with_name(f"{path.name}.aborted-{stamp}"))
 
 
 def _upsert_row(rows: list[dict[str, Any]], row: dict[str, Any]) -> None:
@@ -465,6 +483,7 @@ def _run_one(job: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     if args.llm_timeout_seconds:
         env["LLM_TIMEOUT_SECONDS"] = str(args.llm_timeout_seconds)
 
+    _archive_interrupted(traj_path, log_path)
     start = time.time()
     error = ""
     with log_path.open("w", encoding="utf-8") as log:
@@ -669,6 +688,10 @@ def main() -> int:
     parser.add_argument("--skip-existing", action="store_true",
                         help=("Reuse existing qualified submissions/numeric results in "
                               "the run dir and run only missing or unqualified jobs."))
+    parser.add_argument("--skip-finished", action="store_true",
+                        help=("With --skip-existing, also keep jobs whose agent ran out "
+                              "of turns without a formula (status max_turns_reached), "
+                              "so a resume reruns only interrupted jobs."))
     args = parser.parse_args()
 
     args.run_id = args.run_id or f"batch_{_utc_stamp()}"
@@ -706,6 +729,7 @@ def main() -> int:
         "workers": args.workers,
         "job_order": "mode_task_model",
         "skip_existing": args.skip_existing,
+        "skip_finished": args.skip_finished,
         "n_jobs": len(jobs),
         "created_at_unix": time.time(),
     }

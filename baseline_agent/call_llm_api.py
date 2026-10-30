@@ -18,6 +18,8 @@ Supported providers, selected by alias prefix in `api_source_mapping`:
           key: credentials come from the standard AWS chain (`AWS_PROFILE`,
           env vars, instance role). Region from `AWS_REGION` (defaults to
           us-east-1).
+- 'bo'  : Amazon Bedrock open-weight models (GLM-5) via boto3 InvokeModel with
+          an OpenAI chat-completions body. Same credentials and region as 'br'.
 
 Each provider has its own response-shape quirk (reasoning content, token
 budgets, system-prompt placement) — the per-source branch in `call_llm_api`
@@ -26,7 +28,9 @@ return tuple.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 
 try:
     from openai import OpenAI
@@ -75,6 +79,9 @@ _BEDROCK_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or 
 # Claude 4.7 and later ("Invalid API version" otherwise). Older models keep the
 # classic Bedrock body version; the SDK only fills the field when it is unset.
 _BEDROCK_LEGACY_VERSION_MODELS = {"us.anthropic.claude-opus-4-6-v1", "us.anthropic.claude-sonnet-4-6"}
+# InvokeModel is not streamed, so this bounds a whole response (reasoning plus a
+# 65k completion budget), not the gap between chunks as in the 'br' stream.
+_BEDROCK_READ_TIMEOUT_SECONDS = float(os.getenv("BEDROCK_READ_TIMEOUT_SECONDS") or "900")
 
 
 # Alias → exact OpenAI model id. NOTE: OpenAI's `/v1/models` listing endpoint
@@ -208,6 +215,11 @@ api_source_mapping = {
     "br-claude-opus-4-7":   ("br", "us.anthropic.claude-opus-4-7"),
     "br-claude-opus-4-6":   ("br", "us.anthropic.claude-opus-4-6-v1"),
     "br-claude-sonnet-4-6": ("br", "us.anthropic.claude-sonnet-4-6"),
+    # Amazon Bedrock open-weight models, in-region on-demand ids (no `us.`
+    # profile exists for them). See `_call_bedrock_openweight`.
+    "br-glm-5":             ("bo", "zai.glm-5"),
+    # Non-thinking: not in `_REASONING_MODELS`, so no reasoning_effort is sent.
+    "br-glm-4.7-flash":     ("bo", "zai.glm-4.7-flash"),
     # Examples (uncomment / add as needed):
     # "or/claude-opus-4-7":   ("or", "anthropic/claude-opus-4-7"),
     # "or/gemini-3-pro":      ("or", "google/gemini-3-pro"),
@@ -237,6 +249,7 @@ _REASONING_MODELS = {
     "or-gemini-3-1-pro", "or-gemini-3.1-pro",
     "or-glm52", "or-glm-5.2", "or-deepseek-v4-pro", "or-qwen37max", "or-qwen3.7-max",
     "br-claude-opus-4-8", "br-claude-opus-4-7", "br-claude-opus-4-6", "br-claude-sonnet-4-6",
+    "br-glm-5",
     # DMXAPI: GLM-5.1, Kimi-K2.6 and Qwen3.6-Plus are thinking models —
     # reasoning is included in `completion_tokens` and exposed via
     # `reasoning_content`, so the dm branch needs a large max_tokens
@@ -374,7 +387,8 @@ def _provider_name(api_source: str) -> str:
     """Human-readable provider label for error/log messages."""
     return {"oa": "OpenAI", "ds": "DeepSeek", "an": "Anthropic",
             "go": "Google", "dm": "DMXAPI", "lo": "local OpenAI",
-            "or": "OpenRouter", "br": "Amazon Bedrock"}.get(api_source, api_source)
+            "or": "OpenRouter", "br": "Amazon Bedrock",
+            "bo": "Amazon Bedrock"}.get(api_source, api_source)
 
 
 def _call_anthropic(messages, model, keys, trial_id):
@@ -505,6 +519,95 @@ def _call_bedrock_claude(messages, model, trial_id):
     return content, (thinking or None), breakdown
 
 
+def _split_inline_reasoning(text: str) -> tuple[str, str]:
+    """Bedrock returns GLM-5's thinking inside the message content as a leading
+    `<reasoning>...</reasoning>` block, sometimes followed by the tail of the raw
+    think block ending in `</think>`. Return (reasoning, visible). A reasoning
+    block cut off by the token cap leaves no visible text."""
+    reasoning = ""
+    m = re.match(r"\s*<reasoning>(.*?)(?:</reasoning>|\Z)", text, re.S)
+    if m:
+        reasoning, text = m.group(1), text[m.end():]
+    if "</think>" in text:
+        head, _, text = text.rpartition("</think>")
+        reasoning += head
+    return reasoning, text
+
+
+def _cut_after_first_tool(text: str) -> tuple[str, bool]:
+    """Client-side `stop=_TOOL_CLOSE_TAGS` on the visible text: keep it up to the
+    first tool close tag. Returns (text, whether anything after it was dropped)."""
+    ends = [text.find(tag) + len(tag) for tag in _TOOL_CLOSE_TAGS if tag in text]
+    if not ends:
+        return text, False
+    end = min(ends)
+    return text[:end], bool(text[end:].strip())
+
+
+def _call_bedrock_openweight(messages, model, trial_id, is_reasoning=True, temperature=0.4):
+    """Open-weight models on Amazon Bedrock (GLM-5, GLM-4.7 Flash) via
+    InvokeModel with an OpenAI chat-completions body. Two differences from
+    `_call_bedrock_claude`, both probed on zai.glm-5 (2026-10-30):
+
+    - Thinking: GLM-5 reasons only at `reasoning_effort: "high"`; "low" and
+      "medium" return no reasoning at all. GLM thinking is on/off, so "high" is
+      the counterpart of the paper's thinking-on runs, not a higher tier.
+      Aliases outside `_REASONING_MODELS` (GLM-4.7 Flash) send no
+      `reasoning_effort`, which leaves thinking off, and take the paper's
+      non-reasoning settings: 8192 output tokens, temperature 0.4.
+    - Stop: Converse rejects `stopSequences` for this model, and InvokeModel's
+      `stop` would also fire inside the inline reasoning. The model is left to
+      finish and the visible text is cut after its first tool block, which
+      leaves the same single block in the history as the `br` stop does.
+    """
+    try:
+        import boto3
+        from botocore.config import Config
+    except ImportError as e:
+        raise ImportError("`pip install boto3` is required for Bedrock open-weight models.") from e
+    client = boto3.client(
+        "bedrock-runtime", region_name=_BEDROCK_REGION,
+        config=Config(read_timeout=_BEDROCK_READ_TIMEOUT_SECONDS, connect_timeout=30,
+                      retries={"mode": "standard", "max_attempts": 3}))
+    body = {"messages": messages}
+    if is_reasoning:
+        body["max_tokens"] = _REASONING_MAX_COMPLETION_TOKENS
+        body["reasoning_effort"] = _OPENAI_REASONING_EFFORT or "high"
+    else:
+        body["max_tokens"] = 8192
+        body["temperature"] = temperature
+    try:
+        resp = client.invoke_model(modelId=model, body=json.dumps(body))
+        out = json.loads(resp["body"].read())
+    except Exception as e:
+        print(f"[Trial {trial_id}] Amazon Bedrock API error on {model}: {e}", flush=True)
+        raise
+    choice = (out.get("choices") or [{}])[0]
+    raw = (choice.get("message") or {}).get("content") or ""
+    reasoning, content = _split_inline_reasoning(raw)
+    content, dropped = _cut_after_first_tool(content)
+    if dropped:
+        print(f"[Trial {trial_id}] {model} wrote past its first tool block; "
+              f"kept only that block.", flush=True)
+    content = _heal_close_tag(content)
+    u = out.get("usage") or {}
+    breakdown = {
+        "prompt_tokens": int(u.get("prompt_tokens") or 0),
+        "prompt_cached_tokens": int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0),
+        "completion_tokens": int(u.get("completion_tokens") or 0),
+        # Reasoning is billed inside completion_tokens; Bedrock reports no split.
+        "reasoning_tokens": 0,
+        "total_tokens": int(u.get("total_tokens") or 0),
+        "finish_reason": choice.get("finish_reason") or "stop",
+        "model": model, "api_source": "bo",
+    }
+    if breakdown["finish_reason"] == "length":
+        print(f"[Trial {trial_id}] WARNING: {model} hit max_tokens "
+              f"(output={breakdown['completion_tokens']}). Tool body likely truncated.",
+              flush=True)
+    return content, (reasoning or None), breakdown
+
+
 def _call_gemini(messages, model, keys, trial_id):
     """Gemini via google-genai SDK. Adapts roles user/model and uses
     `system_instruction` for the system prompt."""
@@ -574,6 +677,9 @@ def call_llm_api(messages, model_name, keys=keys, temperature=0.4, trial_info=No
         return _call_anthropic(messages, full_model_name, keys, trial_id)
     if api_source == 'br':
         return _call_bedrock_claude(messages, full_model_name, trial_id)
+    if api_source == 'bo':
+        return _call_bedrock_openweight(messages, full_model_name, trial_id,
+                                        is_reasoning, temperature)
     if api_source == 'go':
         return _call_gemini(messages, full_model_name, keys, trial_id)
 
