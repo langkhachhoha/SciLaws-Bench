@@ -18,8 +18,9 @@ Supported providers, selected by alias prefix in `api_source_mapping`:
           key: credentials come from the standard AWS chain (`AWS_PROFILE`,
           env vars, instance role). Region from `AWS_REGION` (defaults to
           us-east-1).
-- 'bo'  : Amazon Bedrock open-weight models (GLM-5) via boto3 InvokeModel with
-          an OpenAI chat-completions body. Same credentials and region as 'br'.
+- 'bo'  : Amazon Bedrock open-weight models (GLM-5, Qwen3 Coder 30B) via boto3
+          InvokeModel with an OpenAI chat-completions body. Same credentials and
+          region as 'br'.
 
 Each provider has its own response-shape quirk (reasoning content, token
 budgets, system-prompt placement) — the per-source branch in `call_llm_api`
@@ -218,8 +219,8 @@ api_source_mapping = {
     # Amazon Bedrock open-weight models, in-region on-demand ids (no `us.`
     # profile exists for them). See `_call_bedrock_openweight`.
     "br-glm-5":             ("bo", "zai.glm-5"),
-    # Non-thinking: not in `_REASONING_MODELS`, so no reasoning_effort is sent.
-    "br-glm-4.7-flash":     ("bo", "zai.glm-4.7-flash"),
+    # No thinking mode: not in `_REASONING_MODELS`, so no reasoning_effort is sent.
+    "br-qwen3-coder-30b":   ("bo", "qwen.qwen3-coder-30b-a3b-v1:0"),
     # Examples (uncomment / add as needed):
     # "or/claude-opus-4-7":   ("or", "anthropic/claude-opus-4-7"),
     # "or/gemini-3-pro":      ("or", "google/gemini-3-pro"),
@@ -545,16 +546,17 @@ def _cut_after_first_tool(text: str) -> tuple[str, bool]:
 
 
 def _call_bedrock_openweight(messages, model, trial_id, is_reasoning=True, temperature=0.4):
-    """Open-weight models on Amazon Bedrock (GLM-5, GLM-4.7 Flash) via
+    """Open-weight models on Amazon Bedrock (GLM-5, Qwen3 Coder 30B) via
     InvokeModel with an OpenAI chat-completions body. Two differences from
     `_call_bedrock_claude`, both probed on zai.glm-5 (2026-10-30):
 
     - Thinking: GLM-5 reasons only at `reasoning_effort: "high"`; "low" and
       "medium" return no reasoning at all. GLM thinking is on/off, so "high" is
       the counterpart of the paper's thinking-on runs, not a higher tier.
-      Aliases outside `_REASONING_MODELS` (GLM-4.7 Flash) send no
-      `reasoning_effort`, which leaves thinking off, and take the paper's
-      non-reasoning settings: 8192 output tokens, temperature 0.4.
+      Aliases outside `_REASONING_MODELS` (Qwen3 Coder 30B, which has no
+      thinking mode) send no `reasoning_effort` and run at temperature 0.4 with
+      16384 output tokens, gpt-4o-mini's own ceiling: the `oa` branch that ran
+      it sets no cap, and 8192 cut long <python> bodies on other models.
     - Stop: Converse rejects `stopSequences` for this model, and InvokeModel's
       `stop` would also fire inside the inline reasoning. The model is left to
       finish and the visible text is cut after its first tool block, which
@@ -574,7 +576,7 @@ def _call_bedrock_openweight(messages, model, trial_id, is_reasoning=True, tempe
         body["max_tokens"] = _REASONING_MAX_COMPLETION_TOKENS
         body["reasoning_effort"] = _OPENAI_REASONING_EFFORT or "high"
     else:
-        body["max_tokens"] = 8192
+        body["max_tokens"] = 16384
         body["temperature"] = temperature
     try:
         resp = client.invoke_model(modelId=model, body=json.dumps(body))

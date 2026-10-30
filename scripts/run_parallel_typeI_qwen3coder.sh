@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # SciLaws-Parallel, Type I only (66 single-group tasks): the reference agent on
-# GLM-4.7 Flash via Amazon Bedrock with thinking OFF, the small non-reasoning
-# counterpart of the paper's gpt-4o-mini row. Paper defaults: 30 turns,
-# experiment caps in baseline_agent/task.py, and the non-reasoning settings of
-# call_llm_api.py (8192 output tokens, temperature 0.4, no reasoning_effort).
-# Start it inside tmux:
+# Qwen3 Coder 30B via Amazon Bedrock, a small model with no thinking mode at
+# gpt-4o-mini's price. Paper defaults: 30 turns and the experiment caps in
+# baseline_agent/task.py; temperature 0.4 and 16384 output tokens, see
+# _call_bedrock_openweight in call_llm_api.py. Start it inside tmux:
 #
-#   tmux new -s flash                                 # reattach: tmux attach -t flash
-#   bash scripts/run_parallel_typeI_glm47flash.sh
+#   tmux new -s qwen                                  # reattach: tmux attach -t qwen
+#   bash scripts/run_parallel_typeI_qwen3coder.sh
 #
 # Rerun the same command to resume after a crash, Ctrl-C, a dropped session or
 # a reboot. Tasks with a submission, and tasks whose agent used all its turns
@@ -26,7 +25,7 @@ set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO"
 
-MODEL=br-glm-4.7-flash
+MODEL=br-qwen3-coder-30b
 TASK_TYPE=typeI
 N_TASKS=66
 MAX_TURNS=30
@@ -133,16 +132,21 @@ run, model, ttype, n = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv
 rows = list(csv.DictReader((run / "parallel_out" / "parallel_summary.csv").open()))
 scores = [float(r["structure_score"]) if r["structure_score"] not in ("", "None") else 0.0 for r in rows]
 tokens = {"prompt_tokens": 0, "completion_tokens": 0}
+looping = 0
 for traj in (run / "parallel" / "trajectories" / model / ttype).glob("*.traj.json"):
-    usage = json.loads(traj.read_text())["trial"].get("usage_total") or {}
+    trial = json.loads(traj.read_text())["trial"]
+    usage = trial.get("usage_total") or {}
     for k in tokens:
         tokens[k] += int(usage.get(k) or 0)
-# zai.glm-4.7-flash on-demand, us-east-1, AWS Price List 2026-10-30: $0.07 / $0.40 per 1M tokens
-cost = tokens["prompt_tokens"] * 0.07e-6 + tokens["completion_tokens"] * 0.40e-6
+    replies = [m["content"] for m in trial["chat_history"] if m["role"] == "assistant"]
+    looping += sum(bool(a) and a == b for a, b in zip(replies, replies[1:])) >= 3
+# qwen.qwen3-coder-30b-a3b-v1:0 on-demand, us-east-1, AWS Price List 2026-10-30: $0.15 / $0.60 per 1M tokens
+cost = tokens["prompt_tokens"] * 0.15e-6 + tokens["completion_tokens"] * 0.60e-6
 judges = sorted({json.loads(p.read_text()).get("judge_model", "")
                  for p in (run / "parallel_out").glob("*.json") if p.name != "parallel_summary.json"})
 result = {"model": model, "type": ttype, "n_tasks": n, "submitted": len(rows),
           "S_S_strict": sum(scores) / n, "mean_over_submitted": sum(scores) / len(scores) if scores else None,
+          "tasks_with_3plus_repeated_replies": looping,
           "agent_tokens": tokens, "agent_cost_usd_est": round(cost, 2), "judge_models": judges,
           "judge": "Bedrock stand-in (scripts/judge_parallel_bedrock.py), not the paper's GPT-5.4-mini"}
 (run / f"score_{ttype}.json").write_text(json.dumps(result, indent=2) + "\n")

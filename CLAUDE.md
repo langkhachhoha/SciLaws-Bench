@@ -4,7 +4,8 @@ Fork of SciLaws-Bench used to build and evaluate a new **agent harness for
 active-experiment law discovery**, scored on **SciLaws-Parallel** only. The
 upstream reference agent (`baseline_agent/`) is the baseline to beat. A
 Vietnamese walkthrough of the run pipeline and the first smoke-test result is in
-`notes/phan_tich_cau_truc_va_ket_qua.md`.
+`notes/phan_tich_cau_truc_va_ket_qua.md`. Current results, findings and next
+steps: `notes/trang_thai_va_buoc_tiep_theo.md` — read it first when resuming.
 
 **Scope since 2026-10-30: Type I (single-group) tasks only — the 66 tasks in
 `tasks/typeI/`.** Run, score and compare on that split (`--task-types typeI`),
@@ -31,9 +32,9 @@ the counts match (it skips files already present).
 # Main run: all 66 Type I tasks, reference agent on GLM-5, 30 turns, then judge
 # and S_S over 66. Meant for tmux; rerun the same command to resume.
 bash scripts/run_parallel_typeI_glm5.sh          # -> experiments/parallel_typeI_br-glm-5/
-# Same for GLM-4.7 Flash, thinking off (the small non-reasoning row, like the
-# paper's gpt-4o-mini): -> experiments/parallel_typeI_br-glm-4.7-flash/
-bash scripts/run_parallel_typeI_glm47flash.sh
+# Same for Qwen3 Coder 30B, the small non-reasoning model:
+# -> experiments/parallel_typeI_br-qwen3-coder-30b/
+bash scripts/run_parallel_typeI_qwen3coder.sh
 # Their screen stays silent until a task finishes (~10-15 min); per-turn progress:
 watch -n 20 .venv/bin/python scripts/run_status.py [<run_dir>]
 
@@ -92,13 +93,24 @@ body, because what works for Claude does not work here (probed 2026-10-30):
   anything), which leaves one block per turn as the `br` stop does. The paper's
   OpenAI-compatible providers sent no stop at all (`_USE_STOP = False`).
 
-**GLM-4.7 Flash** (`br-glm-4.7-flash`, same `bo` provider) is a hybrid model
-run with thinking off: it is left out of `_REASONING_MODELS`, so no
-`reasoning_effort` is sent (only "high" would turn thinking on) and it gets the
-paper's non-reasoning settings, 8192 output tokens and temperature 0.4.
-≈$0.015 per task. A 3-task pilot of small models (2026-10-30) found Qwen3 32B
-unusable (32k context, crashed mid-task) and Llama 4 Maverick submitting after
-~6 turns.
+**Qwen3 Coder 30B** (`br-qwen3-coder-30b`, same `bo` provider,
+`qwen.qwen3-coder-30b-a3b-v1:0`) is the small non-reasoning model: it has no
+thinking mode (no switch produces reasoning), costs what gpt-4o-mini does
+($0.15 / $0.60 per 1M tokens), and its Bedrock context takes a 240k-token prompt.
+It is left out of `_REASONING_MODELS`, so it runs at temperature 0.4 with 16384
+output tokens, gpt-4o-mini's own ceiling (the `oa` branch that ran it sets no
+cap; 8192 cut long `<python>` bodies on another model).
+
+GLM-4.7 Flash with thinking off was tried and dropped (2026-10-30): 46 of 66
+Type I tasks repeated a byte-identical reply 3+ times (mean 16.9 per task; 2.1
+experiments against GLM-5's 6.6), usually re-sending a call the tool had
+rejected. It does the same through Converse, and GLM-5 never does through the
+same provider, so this is the model, not the provider.
+
+Small-model pilot (3 tasks, 2026-10-30): Nova Lite loops like Flash, Llama 4
+Maverick submits after ~6 turns, and Qwen3 32B has a 32k context and crashed
+mid-task. When piloting a model, count repeated replies and `n_experiments`
+(`scripts/run_status.py` shows both): turns used alone hides a loop.
 
 gpt-oss-20b on Bedrock was tried and dropped (2026-10-30): after its reasoning it
 often returns no visible text (InvokeModel and Converse alike) — 22 of 31 turns
@@ -142,7 +154,8 @@ Claude models to this account (403 for Opus 4.8, 404 for Sonnet 4.6), so the
 - `baseline_agent/` — the reference ReAct loop (`agent.py`), task loaders
   (`task.py`), LLM client (`call_llm_api.py`), batch / resume / salvage runners.
 - `scripts/judge_parallel_bedrock.py` — Bedrock stand-in for the Codex judge.
-- `scripts/run_parallel_typeI_glm5.sh` — resumable Type I run + scoring.
+- `scripts/run_parallel_typeI_{glm5,qwen3coder}.sh` — resumable Type I run +
+  scoring. `scripts/run_status.py` — live progress of a run.
 - `experiments/` — tracked run outputs. `batch_runs/`, `results/`,
   `submissions/`, `parallel_stage/`, `parallel_out/` are gitignored anywhere,
   except `submissions/` and `parallel_out/` under `experiments/`.
@@ -165,7 +178,10 @@ Claude models to this account (403 for Opus 4.8, 404 for Sonnet 4.6), so the
   `SimulatorTask.run_experiment`.
 - Simulator output is `F(X) + noise_scale · kNN-resampled real residual`, with
   inputs silently clipped to the support box (`n_clipped` reports it).
-- A submission must call `<experiment>` at least once; turn 30 is a forced
+- A submission must call `<experiment>` at least once, but the last-chance call
+  after turn 30 (`agent.py`, end of `conduct_exploration`) accepts a formula with
+  no successful experiment: `mincer_earnings_acs_pums__log_wage` on Qwen3 Coder
+  submitted with 0 experiments and was judged 0.25. Turn 30 is a forced
   `<final_formula>` turn with one retry. Strict aggregation: no submission,
   contract failure or missing judge result scores 0.
 - `step()` runs the first-appearing tag *type* but extracts the *last* block of
