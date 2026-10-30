@@ -31,13 +31,15 @@ aws sts get-caller-identity                         # profile phải được c�
 
 ## Kết quả đã có
 
-Đều là agent tham chiếu, 30 turn, Type I, S_S strict chia cho 66. Judge là Opus
+Đều là agent tham chiếu (dòng cuối có thêm guidance cho `<experiment>`), 30 turn,
+Type I, S_S strict chia cho 66. Judge là Opus
 4.6 trên Bedrock, không phải GPT-5.4-mini như bài báo, nên phải ghi rõ khi báo cáo.
 
 | Run | S_S | Nộp | Experiment TB /10 | Turn TV | Chi phí agent | Thư mục |
 |---|---|---|---|---|---|---|
 | GLM-5, thinking bật | **0,489** | 66/66 | 6,6 | 25 | $28,10 | `experiments/parallel_typeI_br-glm-5/` |
-| Qwen3 Coder 30B, không thinking | **0,337** | 66/66 | 4,6 | 11 | $1,07 | `experiments/parallel_typeI_br-qwen3-coder-30b/` |
+| Qwen3 Coder 30B, không thinking | **0,337** | 66/66 | 4,6 | 11 | $1,07 | đã xoá, commit `240e29b` |
+| Qwen3 Coder 30B, có guidance | **0,341** | 66/66 | 4,3 | 9 | $1,06 | `experiments/parallel_typeI_br-qwen3-coder-30b_guided/` |
 
 Mốc Parallel Type I của bài báo (`baseline_agent/all_results.md`): GPT-5.5 0,602,
 GLM-5.2 0,564, Opus 4.8 0,530, DeepSeek-V4 Pro 0,511, GPT-5-mini 0,447,
@@ -47,7 +49,7 @@ khoản này, nên GLM-5 và Qwen3 Coder là hai mốc thay thế: một lớn, 
 Các model đã thử và bỏ (chi tiết trong `CLAUDE.md`): gpt-oss-20b trả về rỗng ở
 phần lớn turn; GLM-4.7 Flash tắt thinking lặp ở 46/66 bài, run đã xoá; Qwen3 32B
 chỉ có context 32k; Llama 4 Maverick nộp sau khoảng 6 turn; Nova Lite cũng lặp.
-Dữ liệu pilot và script ở `experiments/pilot_small_models/`.
+Dữ liệu pilot và script ở `experiments/pilot_small_models/` tại commit `240e29b`.
 
 ## Phát hiện chính, là cơ sở cho harness mới
 
@@ -78,7 +80,7 @@ nhất. `run_status.py` và `score_typeI.json` hiện vẫn dùng chỉ số cũ
 ### 2. Thí nghiệm phát lại: vì sao có model thoát được
 
 Lấy lịch sử đúng lúc gặp lỗi rồi gọi lại, 15 lần mỗi ô, đếm số lần sửa đúng
-(`experiments/pilot_small_models/replay_loop.py`). Mẫu nhỏ, lịch sử lấy từ Flash.
+(`experiments/pilot_small_models/replay_loop.py` tại commit `240e29b`). Mẫu nhỏ, lịch sử lấy từ Flash.
 
 | | Ngay sau lỗi đầu | Sau khi đã lặp 5 lần |
 |---|---|---|
@@ -112,18 +114,59 @@ có số liệu sau khoảng một ngày, so token input bị tính tiền với
 - Lượt cuối vẫn nhận công thức khi không có experiment nào thành công, nên một bài
   có thể có điểm từ kiến thức sẵn có. `mincer` trên Qwen được 0,25 theo cách đó.
 
+### 6. Sửa lỗi `<experiment>`: gần hết lỗi, nhưng điểm chưa tăng
+
+`guided_agent/experiment_guidance.py` bọc `get_task_prompt` và `run_experiment` của
+task, bật bằng `--experiment-guidance` hoặc `EXPERIMENT_GUIDANCE=1` ở script Qwen.
+Prompt của 36 bài nhiều biến có thêm quy tắc ghép theo vị trí và hai ví dụ dùng cột
+của chính bài đó. Lỗi `equal length` trả thêm độ dài từng mảng và một
+`corrected_request` hợp lệ. Request vẫn được chấp nhận hay từ chối như cũ, nên mọi
+giới hạn của `SimulatorTask` giữ nguyên. 30 bài một biến giữ nguyên prompt.
+
+Lỗi `equal length` có hai ý định: 106/179 lần là kiểu lưới (`[4 giá trị]` với
+`[3 giá trị]`), 73/179 lần là kiểu giữ cố định (`[116.0]`).
+
+| Chỉ số | Không guidance | Có guidance |
+|---|---|---|
+| S_S | 0,337 | 0,341 |
+| Experiment thất bại | 185 ở 22 bài | 5 ở 5 bài |
+| Trong đó `equal length` | 179 | 1 |
+| Bài có chuỗi ≥3 | 11 | 0 |
+| Chuỗi dài nhất | 30 | 1 |
+| Experiment TB /10 | 4,6 | 4,3 |
+| Bài nộp bằng lượt ép | 3 | 0 |
+| Bài có 0 experiment | 1 | 0 |
+
+S_S lệch +0,004, khoảng tin cậy bootstrap ghép cặp 95% là [−0,030; +0,038], nên
+chưa có bằng chứng guidance làm tăng điểm. Có 20/66 bài đổi điểm (11 tăng, 9 giảm),
+nhưng 8/30 bài một biến có prompt giống hệt cũng đổi, nên đây là mức nhiễu giữa hai
+lần chạy và chấm. Nhóm 36 bài nhiều biến giữ nguyên 0,333.
+
+Pilot trên 5 bài tệ nhất từng cho 3 bài lên 0,5, nhưng run đủ không lặp lại: cả ba
+vẫn ở 0,25. Vì vậy đừng đánh giá trên một lần chạy của vài bài.
+
+Rút ra: lỗi format không phải nút thắt chính của Qwen. Ba bài gần như mất trắng ở run
+cũ được 0,25 và run mới cũng 0,25. Bỏ được lỗi, model vẫn dừng sớm (4,3/10
+experiment, turn trung vị 9).
+
+Còn một khoảng trống: `commuting_gravity_lodes__flow_Tij` lặp y nguyên 23 turn. Model
+viết tay 70 điểm và đếm sai, 70 vượt `MAX_CORRECTED_POINTS` = 64 nên không có
+`corrected_request`, model chuyển sang `[107.0] * 70`, không phải JSON hợp lệ. Kiểu
+này nhận `Invalid response` thay vì `<experiment_output>` nên không được tính vào
+"experiment thất bại"; `run_status.py` chỉ thể hiện qua số bài lặp câu trả lời.
+
 ## Việc tiếp theo
 
-1. Đưa "số lần gọi experiment thất bại" và "chuỗi thất bại dài nhất" vào
-   `scripts/run_status.py` và phần cuối của các script chạy.
-2. Viết harness mới cạnh `baseline_agent/`, dùng lại `SimulatorTask`:
-   - thêm ví dụ hai biến vào prompt và làm rõ quy tắc ghép theo vị trí;
-   - bọc thông báo lỗi để nêu độ dài từng mảng và cách sửa;
+1. Đưa "số lần gọi experiment thất bại" và "chuỗi thất bại dài nhất" vào phần cuối
+   của các script chạy; `scripts/run_status.py` đã có.
+2. Viết tiếp harness cạnh `baseline_agent/`, dùng lại `SimulatorTask`:
+   - bắt lỗi JSON có biểu thức Python và cho `corrected_request` với yêu cầu dài hơn
+     64 điểm (bài `commuting_gravity`);
    - phát hiện lỗi lặp sớm, ép model đọc lại lỗi trước khi hành động;
-   - báo số turn và số experiment còn lại;
+   - báo số turn và số experiment còn lại, vì Qwen vẫn dùng chưa đến nửa ngân sách;
    - dùng prompt caching hoặc rút gọn output cũ để giảm input.
-3. Đo trước trên 22 bài Qwen có experiment thất bại, rồi chạy đủ 66 bài với cả hai
-   model. Lọc danh sách từ trajectory của run Qwen.
+3. Chạy mỗi cấu hình nhiều lần trước khi kết luận, vì một lần chạy không tách được
+   tác dụng cỡ 0,03 khỏi nhiễu. Sau đó thử guidance trên GLM-5.
 4. Dùng cùng judge với các mốc: `JUDGE_MODEL=global.anthropic.claude-opus-4-6-v1`.
 5. Cân nhắc metric phụ không cần judge: lỗi dự đoán so với định luật ẩn không nhiễu,
    hiệu quả (experiment, turn, token), và chấm lại 2–3 lần để đo độ dao động của judge.

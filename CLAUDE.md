@@ -35,6 +35,9 @@ bash scripts/run_parallel_typeI_glm5.sh          # -> experiments/parallel_typeI
 # Same for Qwen3 Coder 30B, the small non-reasoning model:
 # -> experiments/parallel_typeI_br-qwen3-coder-30b/
 bash scripts/run_parallel_typeI_qwen3coder.sh
+# Qwen3 Coder with the <experiment> format taught (guided_agent/):
+# -> experiments/parallel_typeI_br-qwen3-coder-30b_guided/
+EXPERIMENT_GUIDANCE=1 bash scripts/run_parallel_typeI_qwen3coder.sh
 # Their screen stays silent until a task finishes (~10-15 min); per-turn progress:
 watch -n 20 .venv/bin/python scripts/run_status.py [<run_dir>]
 
@@ -72,7 +75,8 @@ on adaptive thinking at `effort=medium` (paper Appendix B.1; override with
 `REASONING_EFFORT`) and always send stop sequences at the tool close tags. Without
 the stop sequences, Claude with interleaved thinking writes dozens of imagined
 `<experiment>`/`<python>` blocks per turn (42k output tokens on turn 1, kept in
-history); see `experiments/aborted_nostop_br-claude-sonnet-4-6/`. The upstream
+history); that run is `experiments/aborted_nostop_br-claude-sonnet-4-6/` at
+commit `240e29b`. The upstream
 `an` provider sends no `thinking` field, so Claude runs without reasoning there —
 do not use it for paper-comparable runs.
 
@@ -153,10 +157,15 @@ Claude models to this account (403 for Opus 4.8, 404 for Sonnet 4.6), so the
   results incomparable with the paper; build a new harness beside it instead.
 - `baseline_agent/` — the reference ReAct loop (`agent.py`), task loaders
   (`task.py`), LLM client (`call_llm_api.py`), batch / resume / salvage runners.
+- `guided_agent/` — wraps one task to teach the `<experiment>` format; on only with
+  `--experiment-guidance`. Requests are accepted or rejected as before, under the
+  same caps, so `harness/` and `SimulatorTask` stay unchanged.
 - `scripts/judge_parallel_bedrock.py` — Bedrock stand-in for the Codex judge.
 - `scripts/run_parallel_typeI_{glm5,qwen3coder}.sh` — resumable Type I run +
   scoring. `scripts/run_status.py` — live progress of a run.
-- `experiments/` — tracked run outputs. `batch_runs/`, `results/`,
+- `experiments/` — tracked run outputs: the GLM-5 reference run and the guided
+  Qwen3 Coder run. Older and failed runs, including the unguided Qwen3 Coder
+  reference run, are in git at commit `240e29b`. `batch_runs/`, `results/`,
   `submissions/`, `parallel_stage/`, `parallel_out/` are gitignored anywhere,
   except `submissions/` and `parallel_out/` under `experiments/`.
   `parallel_stage/` stays ignored there: it copies the hidden `formula.py`.

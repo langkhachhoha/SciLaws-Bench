@@ -7,6 +7,9 @@ chạy thử một task với Claude trên Amazon Bedrock.
 
 Ngày thực hiện: 2026-10-29. Commit gốc: `6460ba0`.
 
+Các thư mục `experiments/` nhắc ở mục 8 đã được xoá khỏi repo ngày 2026-10-30.
+Lấy lại bằng `git checkout 240e29b -- experiments/<tên thư mục>`.
+
 ---
 
 ## 1. Benchmark nói gì
