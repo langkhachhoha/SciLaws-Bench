@@ -41,6 +41,11 @@ EXPERIMENT_GUIDANCE=0 bash scripts/run_parallel_typeI_minimax.sh
 # Their screen stays silent until a task finishes (~10-15 min); per-turn progress:
 watch -n 20 .venv/bin/python scripts/run_status.py [<run_dir>]
 
+# Read runs turn by turn in the browser: input, reasoning, each call and its output,
+# the submission and the judge's verdict. Every run under experiments/ loads on its
+# own; paste any other run's path into the page. Refresh to pick up new results.
+.venv/bin/python viewer/serve.py                 # http://127.0.0.1:8765
+
 # One Parallel task, 30 turns; add --no-experiment-guidance for the reference agent
 .venv/bin/python baseline_agent/run_baseline.py tasks/typeI/<task> br-glm-5 --simulator --out <dir>
 
@@ -188,6 +193,10 @@ Claude models to this account (403 for Opus 4.8, 404 for Sonnet 4.6), so the
 - `scripts/judge_parallel_bedrock.py` — Bedrock stand-in for the Codex judge.
 - `scripts/run_parallel_typeI_{minimax,glm5,qwen3coder}.sh` — resumable Type I run +
   scoring. `scripts/run_status.py` — live progress of a run.
+- `viewer/` — local read-only page over a run dir (`serve.py` + `index.html`, no
+  dependency beyond `harness/`). It parses turns with the agent's own tag parser and
+  shows the hidden law (`simulator/formula.py`, the judge's `gt_summary`), so it is for
+  people only: never feed its output to an agent.
 - `experiments/` — tracked run outputs: the GLM-5 reference run and the guided
   Qwen3 Coder and MiniMax M2.5 runs. Older and failed runs, including the unguided Qwen3 Coder
   reference run, are in git at commit `240e29b`. `batch_runs/`, `results/`,
