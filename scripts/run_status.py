@@ -16,7 +16,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 # on-demand, us-east-1, AWS Price List 2026-10-30, $ per 1M tokens (in, out)
-PRICE = {"br-glm-5": (1.00, 3.20), "br-qwen3-coder-30b": (0.15, 0.60)}
+PRICE = {"br-glm-5": (1.00, 3.20), "br-qwen3-coder-30b": (0.15, 0.60),
+         "br-minimax-m2-5": (0.30, 1.20)}
 
 
 def _failed_experiments(trial: dict) -> tuple[int, int]:

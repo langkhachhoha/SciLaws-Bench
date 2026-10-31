@@ -2,8 +2,8 @@
 
 Fork of SciLaws-Bench used to build and evaluate a new **agent harness for
 active-experiment law discovery**, scored on **SciLaws-Parallel** only. The
-upstream reference agent (`baseline_agent/`) is the baseline to beat. A
-Vietnamese walkthrough of the run pipeline and the first smoke-test result is in
+upstream reference agent (`baseline_agent/` with `--no-experiment-guidance`) is
+the baseline to beat. A Vietnamese walkthrough of the run pipeline and the first smoke-test result is in
 `notes/phan_tich_cau_truc_va_ket_qua.md`. Current results, findings and next
 steps: `notes/trang_thai_va_buoc_tiep_theo.md` — read it first when resuming.
 
@@ -29,19 +29,19 @@ the counts match (it skips files already present).
 ## Commands
 
 ```bash
-# Main run: all 66 Type I tasks, reference agent on GLM-5, 30 turns, then judge
-# and S_S over 66. Meant for tmux; rerun the same command to resume.
-bash scripts/run_parallel_typeI_glm5.sh          # -> experiments/parallel_typeI_br-glm-5/
-# Same for Qwen3 Coder 30B, the small non-reasoning model:
-# -> experiments/parallel_typeI_br-qwen3-coder-30b/
-bash scripts/run_parallel_typeI_qwen3coder.sh
-# Qwen3 Coder with the <experiment> format taught (guided_agent/):
-# -> experiments/parallel_typeI_br-qwen3-coder-30b_guided/
-EXPERIMENT_GUIDANCE=1 bash scripts/run_parallel_typeI_qwen3coder.sh
+# Main runs: all 66 Type I tasks, <experiment> format taught (guided_agent/, the
+# default), 30 turns, then judge and S_S over 66. Meant for tmux; rerun the same
+# command to resume. Each writes experiments/parallel_typeI_<model>_guided/.
+bash scripts/run_parallel_typeI_minimax.sh       # MiniMax M2.5, the cheap reasoning model
+bash scripts/run_parallel_typeI_glm5.sh          # GLM-5
+bash scripts/run_parallel_typeI_qwen3coder.sh    # Qwen3 Coder 30B, the small non-reasoning model
+# The reference agent without guidance, in a dir without _guided (GLM-5's is
+# experiments/parallel_typeI_br-glm-5/):
+EXPERIMENT_GUIDANCE=0 bash scripts/run_parallel_typeI_minimax.sh
 # Their screen stays silent until a task finishes (~10-15 min); per-turn progress:
 watch -n 20 .venv/bin/python scripts/run_status.py [<run_dir>]
 
-# One Parallel task, reference agent, paper defaults (30 turns)
+# One Parallel task, 30 turns; add --no-experiment-guidance for the reference agent
 .venv/bin/python baseline_agent/run_baseline.py tasks/typeI/<task> br-glm-5 --simulator --out <dir>
 
 # Many tasks (writes summary.tsv/json, per-task logs, trajectories, submissions).
@@ -105,6 +105,28 @@ It is left out of `_REASONING_MODELS`, so it runs at temperature 0.4 with 16384
 output tokens, gpt-4o-mini's own ceiling (the `oa` branch that ran it sets no
 cap; 8192 cut long `<python>` bodies on another model).
 
+**MiniMax M2.5** (`br-minimax-m2-5`, same `bo` provider, `minimax.minimax-m2.5`) is
+the cheap reasoning model: $0.30 / $1.20 per 1M tokens, a 196k context and a 100M
+tokens/minute quota. It reasons at every `reasoning_effort`, none included, at
+about the same length, so the "medium" the provider sends changes nothing. The
+reasoning comes back inline as on GLM-5. Prefer `medium`; use `high` only when a
+model has no other way to reason.
+
+`reasoning_effort` on the cheap Bedrock models (probed 2026-10-31):
+- Reason only at `high`: DeepSeek V3.2, Kimi K2.5, GLM-4.7, Nemotron 3 Super/Nano,
+  Qwen3 Next. At `medium` they answer without reasoning.
+- Reason at every setting: MiniMax M2.5, Kimi K2 Thinking ($0.60 / $2.50),
+  gpt-oss-120b. Only gpt-oss-120b clearly reasons longer at `high`.
+- Magistral Small writes its reasoning in the visible text, which goes into history.
+
+gpt-oss-120b at `medium` was piloted against MiniMax M2.5 and dropped (2026-10-31,
+6 tasks picked for a large GLM-5/Qwen3 Coder gap, guidance on). It had the empty
+replies of gpt-oss-20b, 4 of 78 turns, and stopped early with 2.2 experiments and a
+median of 11.5 turns. MiniMax M2.5 had no empty reply, 5.2 experiments and a median
+of 19 turns. Scored on the same tasks with the same judge: MiniMax M2.5 0.583,
+gpt-oss-120b 0.375, against GLM-5 0.750 and guided Qwen3 Coder 0.292; the task pick
+favours GLM-5, so this ranks the two cheap models and does not estimate S_S.
+
 GLM-4.7 Flash with thinking off was tried and dropped (2026-10-30): 46 of 66
 Type I tasks repeated a byte-identical reply 3+ times (mean 16.9 per task; 2.1
 experiments against GLM-5's 6.6), usually re-sending a call the tool had
@@ -157,14 +179,17 @@ Claude models to this account (403 for Opus 4.8, 404 for Sonnet 4.6), so the
   results incomparable with the paper; build a new harness beside it instead.
 - `baseline_agent/` — the reference ReAct loop (`agent.py`), task loaders
   (`task.py`), LLM client (`call_llm_api.py`), batch / resume / salvage runners.
-- `guided_agent/` — wraps one task to teach the `<experiment>` format; on only with
-  `--experiment-guidance`. Requests are accepted or rejected as before, under the
-  same caps, so `harness/` and `SimulatorTask` stay unchanged.
+- `guided_agent/` — wraps one task to teach the `<experiment>` format. This is the
+  main agent since 2026-10-31: on by default in Parallel mode, off with
+  `--no-experiment-guidance` or `EXPERIMENT_GUIDANCE=0`. Requests are accepted or
+  rejected as before, under the same caps, so `harness/` and `SimulatorTask` stay
+  unchanged, but the agent reads a different prompt, so a guided run is not a
+  reference-agent run. Resuming an unguided run dir needs the off switch too.
 - `scripts/judge_parallel_bedrock.py` — Bedrock stand-in for the Codex judge.
-- `scripts/run_parallel_typeI_{glm5,qwen3coder}.sh` — resumable Type I run +
+- `scripts/run_parallel_typeI_{minimax,glm5,qwen3coder}.sh` — resumable Type I run +
   scoring. `scripts/run_status.py` — live progress of a run.
 - `experiments/` — tracked run outputs: the GLM-5 reference run and the guided
-  Qwen3 Coder run. Older and failed runs, including the unguided Qwen3 Coder
+  Qwen3 Coder and MiniMax M2.5 runs. Older and failed runs, including the unguided Qwen3 Coder
   reference run, are in git at commit `240e29b`. `batch_runs/`, `results/`,
   `submissions/`, `parallel_stage/`, `parallel_out/` are gitignored anywhere,
   except `submissions/` and `parallel_out/` under `experiments/`.
@@ -193,6 +218,12 @@ Claude models to this account (403 for Opus 4.8, 404 for Sonnet 4.6), so the
   submitted with 0 experiments and was judged 0.25. Turn 30 is a forced
   `<final_formula>` turn with one retry. Strict aggregation: no submission,
   contract failure or missing judge result scores 0.
+- The contract check (`_sample_matrix` in `harness/evaluate_parallel.py`) runs
+  `predict` on 8 rows spanning each input's metadata `range`, and an input with no
+  `range` (9 of the 66 tasks have one) gets [0, 1]. A negative power or log of that
+  input then fails with `predict returned non-finite values` and scores 0, even if
+  it is finite on all real data: `her_hor_pt_acid_kucernak__current_density`, where
+  `c_acid` lists only `values: [0.5, 4.0]`, on GLM-5 and MiniMax M2.5.
 - `step()` runs the first-appearing tag *type* but extracts the *last* block of
   that type (`_last_block` uses `rfind`), so multi-block replies execute their
   last `<experiment>`, not their first.

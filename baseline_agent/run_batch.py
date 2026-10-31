@@ -471,8 +471,8 @@ def _run_one(job: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     ]
     if mode == "parallel":
         cmd.append("--simulator")
-        if args.experiment_guidance:
-            cmd.append("--experiment-guidance")
+        cmd.append("--experiment-guidance" if args.experiment_guidance
+                   else "--no-experiment-guidance")
     elif include_range:
         cmd.append("--include-test-range")
     else:
@@ -694,9 +694,11 @@ def main() -> int:
                         help=("With --skip-existing, also keep jobs whose agent ran out "
                               "of turns without a formula (status max_turns_reached), "
                               "so a resume reruns only interrupted jobs."))
-    parser.add_argument("--experiment-guidance", action="store_true",
+    parser.add_argument("--experiment-guidance", action=argparse.BooleanOptionalAction,
+                        default=True,
                         help=("Parallel mode: teach the <experiment> request format, see "
-                              "guided_agent/experiment_guidance.py."))
+                              "guided_agent/experiment_guidance.py. "
+                              "--no-experiment-guidance runs the upstream reference agent."))
     args = parser.parse_args()
 
     args.run_id = args.run_id or f"batch_{_utc_stamp()}"

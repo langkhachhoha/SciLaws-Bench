@@ -18,7 +18,7 @@ Supported providers, selected by alias prefix in `api_source_mapping`:
           key: credentials come from the standard AWS chain (`AWS_PROFILE`,
           env vars, instance role). Region from `AWS_REGION` (defaults to
           us-east-1).
-- 'bo'  : Amazon Bedrock open-weight models (GLM-5, Qwen3 Coder 30B) via boto3
+- 'bo'  : Amazon Bedrock open-weight models (GLM-5, Qwen3 Coder 30B, MiniMax M2.5) via boto3
           InvokeModel with an OpenAI chat-completions body. Same credentials and
           region as 'br'.
 
@@ -221,6 +221,8 @@ api_source_mapping = {
     "br-glm-5":             ("bo", "zai.glm-5"),
     # No thinking mode: not in `_REASONING_MODELS`, so no reasoning_effort is sent.
     "br-qwen3-coder-30b":   ("bo", "qwen.qwen3-coder-30b-a3b-v1:0"),
+    # Reasons at every `reasoning_effort`, and the provider sends "medium".
+    "br-minimax-m2-5":      ("bo", "minimax.minimax-m2.5"),
     # Examples (uncomment / add as needed):
     # "or/claude-opus-4-7":   ("or", "anthropic/claude-opus-4-7"),
     # "or/gemini-3-pro":      ("or", "google/gemini-3-pro"),
@@ -250,7 +252,7 @@ _REASONING_MODELS = {
     "or-gemini-3-1-pro", "or-gemini-3.1-pro",
     "or-glm52", "or-glm-5.2", "or-deepseek-v4-pro", "or-qwen37max", "or-qwen3.7-max",
     "br-claude-opus-4-8", "br-claude-opus-4-7", "br-claude-opus-4-6", "br-claude-sonnet-4-6",
-    "br-glm-5",
+    "br-glm-5", "br-minimax-m2-5",
     # DMXAPI: GLM-5.1, Kimi-K2.6 and Qwen3.6-Plus are thinking models —
     # reasoning is included in `completion_tokens` and exposed via
     # `reasoning_content`, so the dm branch needs a large max_tokens
@@ -296,6 +298,9 @@ _OPENAI_REASONING_EFFORT = (
     or os.getenv("REASONING_EFFORT")
     or ""
 ).strip().lower()
+# `reasoning_effort` of Bedrock open-weight models when REASONING_EFFORT is unset;
+# "medium" otherwise. See `_call_bedrock_openweight`.
+_BEDROCK_REASONING_EFFORT = {"zai.glm-5": "high"}
 _LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS") or "120")
 
 
@@ -521,10 +526,10 @@ def _call_bedrock_claude(messages, model, trial_id):
 
 
 def _split_inline_reasoning(text: str) -> tuple[str, str]:
-    """Bedrock returns GLM-5's thinking inside the message content as a leading
-    `<reasoning>...</reasoning>` block, sometimes followed by the tail of the raw
-    think block ending in `</think>`. Return (reasoning, visible). A reasoning
-    block cut off by the token cap leaves no visible text."""
+    """Bedrock returns the thinking of GLM-5 and MiniMax M2.5 inside the message
+    content as a leading `<reasoning>...</reasoning>` block, sometimes followed by
+    the tail of the raw think block ending in `</think>`. Return (reasoning,
+    visible). A reasoning block cut off by the token cap leaves no visible text."""
     reasoning = ""
     m = re.match(r"\s*<reasoning>(.*?)(?:</reasoning>|\Z)", text, re.S)
     if m:
@@ -546,14 +551,15 @@ def _cut_after_first_tool(text: str) -> tuple[str, bool]:
 
 
 def _call_bedrock_openweight(messages, model, trial_id, is_reasoning=True, temperature=0.4):
-    """Open-weight models on Amazon Bedrock (GLM-5, Qwen3 Coder 30B) via
-    InvokeModel with an OpenAI chat-completions body. Two differences from
+    """Open-weight models on Amazon Bedrock (GLM-5, Qwen3 Coder 30B, MiniMax M2.5)
+    via InvokeModel with an OpenAI chat-completions body. Two differences from
     `_call_bedrock_claude`, both probed on zai.glm-5 (2026-10-30):
 
     - Thinking: GLM-5 reasons only at `reasoning_effort: "high"`; "low" and
       "medium" return no reasoning at all. GLM thinking is on/off, so "high" is
       the counterpart of the paper's thinking-on runs, not a higher tier.
-      Aliases outside `_REASONING_MODELS` (Qwen3 Coder 30B, which has no
+      MiniMax M2.5 reasons at every setting, none included (probed 2026-10-31),
+      so it gets the default "medium". Aliases outside `_REASONING_MODELS` (Qwen3 Coder 30B, which has no
       thinking mode) send no `reasoning_effort` and run at temperature 0.4 with
       16384 output tokens, gpt-4o-mini's own ceiling: the `oa` branch that ran
       it sets no cap, and 8192 cut long <python> bodies on other models.
@@ -574,7 +580,7 @@ def _call_bedrock_openweight(messages, model, trial_id, is_reasoning=True, tempe
     body = {"messages": messages}
     if is_reasoning:
         body["max_tokens"] = _REASONING_MAX_COMPLETION_TOKENS
-        body["reasoning_effort"] = _OPENAI_REASONING_EFFORT or "high"
+        body["reasoning_effort"] = _OPENAI_REASONING_EFFORT or _BEDROCK_REASONING_EFFORT.get(model, "medium")
     else:
         body["max_tokens"] = 16384
         body["temperature"] = temperature

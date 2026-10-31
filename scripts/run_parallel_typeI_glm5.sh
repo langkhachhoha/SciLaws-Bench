@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SciLaws-Parallel, Type I only (66 single-group tasks): the reference agent on
+# SciLaws-Parallel, Type I only (66 single-group tasks): the agent on
 # GLM-5 via Amazon Bedrock, paper defaults (30 turns, experiment caps in
 # baseline_agent/task.py). Start it inside tmux:
 #
@@ -15,8 +15,13 @@
 # Once all 66 tasks are finished it stages the submissions, judges them on
 # Bedrock (judge results are kept across reruns) and prints S_S over 66 tasks.
 #
+# The agent is taught the <experiment> format (guided_agent/experiment_guidance.py)
+# and the run dir ends in _guided. EXPERIMENT_GUIDANCE=0 runs the upstream reference
+# agent without it, in a dir without that suffix.
+#
 # Overrides (env): RUN_NAME, WORKERS, MAX_PASSES, RETRY_SLEEP, TASK_TIMEOUT,
-#                  SKIP_SCORE=1, JUDGE_MODEL, AWS_PROFILE, AWS_REGION.
+#                  SKIP_SCORE=1, JUDGE_MODEL, AWS_PROFILE, AWS_REGION,
+#                  EXPERIMENT_GUIDANCE=0.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -26,7 +31,13 @@ MODEL=br-glm-5
 TASK_TYPE=typeI
 N_TASKS=66
 MAX_TURNS=30
-RUN_NAME=${RUN_NAME:-parallel_${TASK_TYPE}_${MODEL}}
+EXPERIMENT_GUIDANCE=${EXPERIMENT_GUIDANCE:-1}
+if [[ $EXPERIMENT_GUIDANCE == 0 ]]; then
+    GUIDANCE_SUFFIX= GUIDANCE_FLAG=--no-experiment-guidance
+else
+    GUIDANCE_SUFFIX=_guided GUIDANCE_FLAG=--experiment-guidance
+fi
+RUN_NAME=${RUN_NAME:-parallel_${TASK_TYPE}_${MODEL}${GUIDANCE_SUFFIX}}
 RUN_DIR=$REPO/experiments/$RUN_NAME
 WORKERS=${WORKERS:-8}
 MAX_PASSES=${MAX_PASSES:-3}
@@ -92,6 +103,7 @@ for pass in $(seq 1 "$MAX_PASSES"); do
         --task-timeout-seconds "$TASK_TIMEOUT" \
         --run-dir "$RUN_DIR" --run-id "$RUN_NAME" \
         --skip-existing --skip-finished --merge-existing-summary \
+        "$GUIDANCE_FLAG" \
         2>&1 | tee "$RUN_DIR/batch_logs/batch_$(stamp).log" || true
     left=$(count_unfinished)
     if [[ $left -gt 0 && $pass -lt $MAX_PASSES ]]; then

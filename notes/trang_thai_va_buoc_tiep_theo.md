@@ -1,6 +1,6 @@
 # Trạng thái dự án và việc tiếp theo
 
-Cập nhật 2026-10-30. File này để bật lại công việc trên máy khác. Memory của
+Cập nhật 2026-10-31. File này để bật lại công việc trên máy khác. Memory của
 Claude Code nằm trong `~/.claude` nên không đi theo repo; những gì cần giữ đều ở
 đây và trong `CLAUDE.md`. `CLAUDE.md` giữ các quy tắc và chi tiết kỹ thuật, file
 này giữ bối cảnh, kết quả và kế hoạch.
@@ -31,7 +31,7 @@ aws sts get-caller-identity                         # profile phải được c�
 
 ## Kết quả đã có
 
-Đều là agent tham chiếu (dòng cuối có thêm guidance cho `<experiment>`), 30 turn,
+Agent tham chiếu, thêm guidance cho `<experiment>` ở các dòng có ghi, 30 turn,
 Type I, S_S strict chia cho 66. Judge là Opus
 4.6 trên Bedrock, không phải GPT-5.4-mini như bài báo, nên phải ghi rõ khi báo cáo.
 
@@ -40,6 +40,7 @@ Type I, S_S strict chia cho 66. Judge là Opus
 | GLM-5, thinking bật | **0,489** | 66/66 | 6,6 | 25 | $28,10 | `experiments/parallel_typeI_br-glm-5/` |
 | Qwen3 Coder 30B, không thinking | **0,337** | 66/66 | 4,6 | 11 | $1,07 | đã xoá, commit `240e29b` |
 | Qwen3 Coder 30B, có guidance | **0,341** | 66/66 | 4,3 | 9 | $1,06 | `experiments/parallel_typeI_br-qwen3-coder-30b_guided/` |
+| MiniMax M2.5, reasoning, có guidance | **0,447** | 66/66 | 5,0 | 19,5 | $6,00 | `experiments/parallel_typeI_br-minimax-m2-5_guided/` |
 
 Mốc Parallel Type I của bài báo (`baseline_agent/all_results.md`): GPT-5.5 0,602,
 GLM-5.2 0,564, Opus 4.8 0,530, DeepSeek-V4 Pro 0,511, GPT-5-mini 0,447,
@@ -48,7 +49,7 @@ khoản này, nên GLM-5 và Qwen3 Coder là hai mốc thay thế: một lớn, 
 
 Các model đã thử và bỏ (chi tiết trong `CLAUDE.md`): gpt-oss-20b trả về rỗng ở
 phần lớn turn; GLM-4.7 Flash tắt thinking lặp ở 46/66 bài, run đã xoá; Qwen3 32B
-chỉ có context 32k; Llama 4 Maverick nộp sau khoảng 6 turn; Nova Lite cũng lặp.
+chỉ có context 32k; Llama 4 Maverick nộp sau khoảng 6 turn; Nova Lite cũng lặp; gpt-oss-120b trả rỗng như bản 20b và nộp sớm.
 Dữ liệu pilot và script ở `experiments/pilot_small_models/` tại commit `240e29b`.
 
 ## Phát hiện chính, là cơ sở cho harness mới
@@ -117,8 +118,9 @@ có số liệu sau khoảng một ngày, so token input bị tính tiền với
 ### 6. Sửa lỗi `<experiment>`: gần hết lỗi, nhưng điểm chưa tăng
 
 `guided_agent/experiment_guidance.py` bọc `get_task_prompt` và `run_experiment` của
-task, bật bằng `--experiment-guidance` hoặc `EXPERIMENT_GUIDANCE=1` ở script Qwen.
-Prompt của 36 bài nhiều biến có thêm quy tắc ghép theo vị trí và hai ví dụ dùng cột
+task. Từ 2026-10-31 đây là bản chính: bật mặc định ở chế độ Parallel, cả ba script
+ghi vào thư mục `*_guided`; `--no-experiment-guidance` hoặc `EXPERIMENT_GUIDANCE=0`
+trả về agent tham chiếu. Prompt của 36 bài nhiều biến có thêm quy tắc ghép theo vị trí và hai ví dụ dùng cột
 của chính bài đó. Lỗi `equal length` trả thêm độ dài từng mảng và một
 `corrected_request` hợp lệ. Request vẫn được chấp nhận hay từ chối như cũ, nên mọi
 giới hạn của `SimulatorTask` giữ nguyên. 30 bài một biến giữ nguyên prompt.
@@ -155,6 +157,68 @@ viết tay 70 điểm và đếm sai, 70 vượt `MAX_CORRECTED_POINTS` = 64 nê
 này nhận `Invalid response` thay vì `<experiment_output>` nên không được tính vào
 "experiment thất bại"; `run_status.py` chỉ thể hiện qua số bài lặp câu trả lời.
 
+### 7. MiniMax M2.5: model reasoning rẻ, S_S 0,447
+
+Cần một model reasoning rẻ hơn GLM-5 ($1,00 / $3,20) mà không phải dùng `high`. Gọi
+thử 10 model ở cả 4 mức effort cho thấy nhiều model rẻ chỉ reasoning ở `high`, nên
+chỉ còn MiniMax M2.5 ($0,30 / $1,20), Kimi K2 Thinking ($0,60 / $2,50) và gpt-oss-120b
+($0,15 / $0,60). Bảng phân loại ở `CLAUDE.md`.
+
+Pilot 6 bài, có guidance, `medium`, judge Opus 4.6. Chọn các bài GLM-5 hơn Qwen nhiều,
+cộng `cepheid`, `mincer` và `commuting_gravity`, nên số này chỉ để xếp hạng hai model
+rẻ, không phải ước lượng S_S.
+
+| Chỉ số | MiniMax M2.5 | gpt-oss-120b | GLM-5 | Qwen, guidance |
+|---|---|---|---|---|
+| Điểm TB trên 6 bài | 0,583 | 0,375 | 0,750 | 0,292 |
+| Experiment TB /10 | 5,2 | 2,2 | | |
+| Turn TV | 19 | 11,5 | | |
+| Reply rỗng | 0/119 | 4/78 | | |
+| Chi phí mỗi bài | $0,08 | $0,02 | ≈$0,43 | ≈$0,02 |
+
+MiniMax reasoning ở mọi mức, kể cả không gửi effort, nên `medium` chỉ là danh nghĩa.
+`commuting_gravity` dùng đủ 10/10 experiment và được 0,75, bằng GLM-5, trong khi Qwen
+lặp 23 turn ở bài này.
+
+Run đủ 66 bài (2026-10-31) có S_S 0,447, nộp 66/66, không bài nào bị gián đoạn, chi
+phí agent $6,00, bằng 21% GLM-5 ($0,09 so với $0,43 mỗi bài). Judge của cả ba run là
+Opus 4.6. So sánh ghép cặp trên 66 bài, khoảng tin cậy bootstrap 95%:
+
+| So sánh | Chênh lệch S_S | KTC 95% | Hơn / kém / bằng |
+|---|---|---|---|
+| MiniMax − GLM-5 | −0,042 | [−0,095; +0,011] | 12 / 20 / 34 |
+| MiniMax − Qwen, guidance | +0,106 | [+0,057; +0,155] | 26 / 6 / 34 |
+
+| Chỉ số | MiniMax | GLM-5, không guidance | Qwen, guidance |
+|---|---|---|---|
+| S_S 30 bài một biến | 0,458 | 0,458 | 0,350 |
+| S_S 36 bài nhiều biến | 0,438 | 0,514 | 0,333 |
+| Bài đạt từ 0,75 trở lên | 8 | 16 | 2 |
+| Bài dùng đủ 10 experiment | 0 | 6 | 0 |
+| Bài nộp trước turn 30 | 59 | 48 | 65 |
+| Experiment thất bại | 22 ở 17 bài | 58 ở 34 bài | 5 ở 5 bài |
+
+- MiniMax hơn Qwen rõ ràng. Với GLM-5, một lần chạy chưa tách được khác biệt, và phép so
+  sánh này lẫn cả model lẫn guidance vì GLM-5 chạy không guidance.
+- GLM-5 hơn ở bài nhiều biến và ở nhóm điểm cao; bài một biến thì hoà.
+- Reasoning giúp model làm việc lâu hơn (turn trung vị 19,5 so với 9 của Qwen), nhưng
+  vẫn chỉ dùng 5,0/10 experiment. Tương quan giữa số experiment và điểm là −0,04.
+- 22 lần thất bại gồm 11 `n_samples` vượt trần, 9 `equal length`, 2 vượt số điểm. Chuỗi
+  dài nhất là 3. Reply rỗng 2/1329 turn.
+- `commuting_gravity` từ 0,75 ở pilot xuống 0,5 với 5 experiment ở run đủ, thêm một ví dụ
+  cho thấy không nên kết luận từ một lần chạy của vài bài.
+
+S_S trùng với GPT-5-mini của bài báo (0,447), nhưng judge khác nên chỉ để tham khảo.
+
+**Contract check làm mất điểm oan.** `her_hor_pt_acid_kucernak__current_density` được
+judge cho 0,5 nhưng tính 0 vì `predict returned non-finite values`. Check này
+(`_sample_matrix` trong `harness/evaluate_parallel.py`) chạy `predict` trên 8 dòng trải
+theo `range` của metadata. `c_acid` chỉ có `values: [0.5, 4.0]`, không có `range`, nên
+bị thử trên [0; 1]; dòng đầu có `c_acid = 0` và `c_acid ** (-m)` thành `inf`. Công thức
+vẫn hữu hạn trên cả 676 dòng train. GLM-5 mất đúng bài này (judge cho 0,25), còn Qwen
+thì không. Điểm chính thức giữ nguyên vì `harness/` đóng băng; nếu dùng điểm judge,
+MiniMax là 0,455 và GLM-5 là 0,492. Có 9/66 bài có input không có `range`.
+
 ## Việc tiếp theo
 
 1. Đưa "số lần gọi experiment thất bại" và "chuỗi thất bại dài nhất" vào phần cuối
@@ -164,7 +228,9 @@ này nhận `Invalid response` thay vì `<experiment_output>` nên không đư�
      64 điểm (bài `commuting_gravity`);
    - phát hiện lỗi lặp sớm, ép model đọc lại lỗi trước khi hành động;
    - báo số turn và số experiment còn lại, vì Qwen vẫn dùng chưa đến nửa ngân sách;
-   - dùng prompt caching hoặc rút gọn output cũ để giảm input.
+   - dùng prompt caching hoặc rút gọn output cũ để giảm input;
+   - chạy thử contract check trước khi nộp và cho model sửa, để công thức đúng không bị
+     tính 0 như `her_hor_pt_acid_kucernak__current_density`.
 3. Chạy mỗi cấu hình nhiều lần trước khi kết luận, vì một lần chạy không tách được
    tác dụng cỡ 0,03 khỏi nhiễu. Sau đó thử guidance trên GLM-5.
 4. Dùng cùng judge với các mốc: `JUDGE_MODEL=global.anthropic.claude-opus-4-6-v1`.
